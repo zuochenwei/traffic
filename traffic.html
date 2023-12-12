@@ -113,15 +113,6 @@
                         }
                         document.getElementById('trafficValue').textContent = value;
                     })
-                    axios.get('http://localhost:3000/realSource')
-                    .then((response) => {
-                        // 请求成功时的处理
-                        const data = response.data;
-                           if(data.result[0].geojson!==null){
-                            // L.geoJSON(data.result[0].geojson).addTo(geoMap)
-                            console.log(data.result[0].geojson)
-                           }
-                    })
             } catch (error) {
                 console.error('发送到后端时出错：', error);
             };
@@ -300,5 +291,4 @@
         }, 1000)
     </script>
 </body>
-
 </html>
