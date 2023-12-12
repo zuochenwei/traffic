@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>DBeaver GIS viewer - Leaflet</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <link rel="stylesheet" href="inc/leaflet.css" />
+    <script src="inc/leaflet.js"></script>
+    <script src="js/AnimatedMarker.js"></script>
+    <script src="js/leaflet.polylineDecorator.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+        }
+
+        #map {
+            position: absolute;
+            height: 100%;
+            width: 100%;
+            right: 0;
+            left: 0;
+        }
+
+        #value {
+            position: relative;
+            text-align: center;
+            top: 10px;
+            margin: 0 50px;
+            padding: 5px;
+            border-radius: 3px;
+            z-index: 999;
+            color: #ffffff;
+            background-color: rgba(0, 168, 0, 1);
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+    <div id="value">
+        车辆实时位置：<span id="Localtion">-----</span>
+        当前路线拥堵情况：<span id="trafficValue">-----</span><br>
+    </div>
+    <script>
+        var geoMap = L.map('map', {
+            crs: L.CRS.EPSG3857,
+            center: [36.66, 117.12],
+            zoom: 15,
+            preferCanvas: true // 使用canvas模式渲染矢量图形 
+        });
+        var layer = L.tileLayer('http://t0.tianditu.gov.cn/img_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=img&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=00a0eb37ce20466034702928f409754a', {
+        }
+        ).addTo(geoMap);
+        var layer_tip = L.tileLayer('http://t0.tianditu.gov.cn/cia_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=cia&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=00a0eb37ce20466034702928f409754a',
+        ).addTo(geoMap);
+        //获取所有车辆位置
+        axios.get('http://localhost:3000/allMarker')
+            .then((response) => {
+                const data = response.data;
+                const icon = L.icon({
+                    iconUrl: 'https://openlayers.org/en/v8.2.0/examples/data/icon.png',
+                    iconSize: [20, 25],
+                })
+                for (var i = 0; i < data.length; i++) {
+                    L.marker([data[i].y, data[i].x], { icon: icon }).addTo(geoMap);
+                }
+            })
+            .catch((error) => {
+                console.error("Error fetching data:", error);
+            });
+        //加载路线网络
+        axios.get('http://localhost:3000/route')
+            .then((response) => {
+                // 请求成功时的处理
+                const geojsonMarkerOptions = {
+                    radius: 4,
+                    weight: 3,
+                };
+                const data = response.data;
+                const vectorLayer = L.geoJSON(data, {
+                    pointToLayer: function (feature, latlng) {
+                        return L.circleMarker(latlng, geojsonMarkerOptions);
+                    },
+                });
+                vectorLayer.addTo(geoMap)
+            })
+            .catch((error) => {
+                // 请求失败时的处理
+                console.error('请求失败：', error);
+            });
+        //将小车实时坐标更新到数据库并设置触发器，通过聚合函数检测离车100m内的车数，得出车辆密度判断道路拥挤程度。
+        async function sendData(data1, data2) {
+            try {
+                const data = {
+                    param1: data1,
+                    param2: data2
+                };
+                const response = await axios.post('http://localhost:3000/data', data);
+                axios.get('http://localhost:3000/clusterResult')
+                    .then((response) => {
+                        // 请求成功时的处理
+                        var value;
+                        const data = response.data;
+                        if (data.result[0].num_points_in_cluster <= 3) {
+                            value = '畅通'
+                        } else if (data.result[0].num_points_in_cluster <= 6) {
+                            value = '一般'
+                        } else {
+                            value = '拥堵'
+                        }
+                        document.getElementById('trafficValue').textContent = value;
+                    })
+                    axios.get('http://localhost:3000/realSource')
+                    .then((response) => {
+                        // 请求成功时的处理
+                        const data = response.data;
+                           if(data.result[0].geojson!==null){
+                            // L.geoJSON(data.result[0].geojson).addTo(geoMap)
+                            console.log(data.result[0].geojson)
+                           }
+                    })
+            } catch (error) {
+                console.error('发送到后端时出错：', error);
+            };
+           
+        }
+        //路径规划，根据存储在数据库中的济南历下区路网数据，通过pgRouting规划到目的地的最短路径。
+        setTimeout(function () {
+            axios.get('http://localhost:3000/dijkstra0')
+                .then((response) => {
+                    // 请求成功时的处理
+                    const data = response.data;
+                    const vectorLayer = L.geoJSON(data, {
+                        color: 'red'
+                    });
+                    vectorLayer.addTo(geoMap).bringToFront()
+                    geoMap.fitBounds(vectorLayer.getBounds())
+
+                    vectorLayer.eachLayer(function (layer) {
+                        coor = layer.getLatLngs()
+                        lineLayer = layer
+                    })
+                    // 实时轨迹线
+                    var realRouteLine = L.polyline([], {
+                        weight: 8,
+                        color: '#FF9900'
+                    }).addTo(geoMap);
+                    // 轨迹方向箭头
+                    var decorator = L.polylineDecorator(lineLayer, {
+                        patterns: [{
+                            repeat: 50,
+                            symbol: L.Symbol.arrowHead({
+                                pixelSize: 5,
+                                headAngle: 75,
+                                polygon: false,
+                                pathOptions: {
+                                    stroke: true,
+                                    weight: 2,
+                                    color: '#FFFFFF'
+                                }
+                            })
+                        }]
+                    }).addTo(geoMap);
+                    var carIcon = L.icon({
+                        iconSize: [37, 26],
+                        iconAnchor: [19, 13],
+                        iconUrl: 'js/images/car.png'
+                    })
+                    // 动态marker
+                    var animatedMarker = L.animatedMarker(coor, {
+                        interval: 1000, // 默认为100mm
+                        icon: carIcon,
+                        playCall: updateRealLine
+                    }).addTo(geoMap)
+                    var newLatlngs = [lineLayer.getLatLngs()[0]]
+                    function updateRealLine(latlng) {
+                        newLatlngs.push(latlng)
+                        realRouteLine.setLatLngs(newLatlngs)
+                    }
+                    animatedMarker.start();
+                    animatedMarker.on('move', function (event) {
+                        var realTimePosition = event.latlng;
+                        var roundedLat = parseFloat(realTimePosition.lat.toFixed(7));
+                        var roundedLng = parseFloat(realTimePosition.lng.toFixed(7));
+                        document.getElementById('Localtion').textContent = realTimePosition
+                        sendData(roundedLat, roundedLng)
+                        if (JSON.stringify([roundedLat, roundedLng]) === JSON.stringify([36.6713895, 117.1233231])) {
+                            animatedMarker.pause();
+                            geoMap.removeLayer(animatedMarker)
+                            var line = L.polyline([[36.67138950000002, 117.1233231], [36.67100169999999, 117.12312329999999], [36.6704194, 117.12283559999996], [36.66808439999999, 117.12170420000002]], {
+                                color: 'yellow'
+                            }).addTo(geoMap)
+                            // 实时轨迹线
+                            var realLine = L.polyline([], {
+                                weight: 8,
+                                color: '#FF9900'
+                            }).addTo(geoMap);
+                            // 轨迹方向箭头
+                            var decoratorLine = L.polylineDecorator(line, {
+                                patterns: [{
+                                    repeat: 50,
+                                    symbol: L.Symbol.arrowHead({
+                                        pixelSize: 5,
+                                        headAngle: 75,
+                                        polygon: false,
+                                        pathOptions: {
+                                            stroke: true,
+                                            weight: 2,
+                                            color: '#FFFFFF'
+                                        }
+                                    })
+                                }]
+                            }).addTo(geoMap);
+                            var newMarker = L.animatedMarker(line.getLatLngs(), {
+                                interval: 1000, // 默认为100mm
+                                icon: carIcon,
+                                playCall: updateLine
+                            }).addTo(geoMap)
+                            var newLatlng = [line.getLatLngs()[0]]
+                            function updateLine(latlng) {
+                                newLatlng.push(latlng)
+                                realLine.setLatLngs(newLatlng)
+                            }
+                            newMarker.start();
+                            var Tooltip = L.tooltip({
+                                offset: [10, -10],
+                                direction: 'top',
+                                permanent: true,
+                                sticky: true,
+                                opacity: 0.8,
+                                className: 'tip'
+                            }).setContent('走错了');
+                            newMarker.on('move', async function (event) {
+                                var newPosition = event.latlng;
+                                var newroundedLat = parseFloat(newPosition.lat.toFixed(7));
+                                var newroundedLng = parseFloat(newPosition.lng.toFixed(7));
+                                document.getElementById('Localtion').textContent = newPosition
+                                Tooltip.setLatLng(newPosition).addTo(geoMap);
+                                sendData(newroundedLat, newroundedLng)
+                                if (JSON.stringify([newroundedLat, newroundedLng]) === JSON.stringify([36.6680844, 117.1217042])) {
+                                    geoMap.removeLayer(newMarker)
+                                    geoMap.removeLayer(Tooltip)
+                                  await axios.get('http://localhost:3000/dijkstra1')
+                                        .then((response) => {
+                                            // 请求成功时的处理
+                                            const data = response.data;
+                                            var resetLayer = L.geoJSON(data, {
+                                                color: 'orange'
+                                            }).addTo(geoMap)
+                                            resetLayer.eachLayer(function (layer) {
+                                                // 实时轨迹线
+                                                var realTimeLine = L.polyline([], {
+                                                    weight: 8,
+                                                    color: '#FF9900'
+                                                }).addTo(geoMap);
+                                                // 轨迹方向箭头
+                                                var decorator = L.polylineDecorator(layer, {
+                                                    patterns: [{
+                                                        repeat: 100,
+                                                        symbol: L.Symbol.arrowHead({
+                                                            pixelSize: 5,
+                                                            headAngle: 75,
+                                                            polygon: false,
+                                                            pathOptions: {
+                                                                stroke: true,
+                                                                weight: 2,
+                                                                color: '#FFFFFF'
+                                                            }
+                                                        })
+                                                    }]
+                                                }).addTo(geoMap);
+                                                var resetMarker = L.animatedMarker(layer.getLatLngs(), {
+                                                    interval: 1500,
+                                                    icon: carIcon,
+                                                    playCall: updateLayer
+                                                }).addTo(geoMap)
+                                                var newLocal = [layer.getLatLngs()[0]]
+                                                resetMarker.start();
+                                                function updateLayer(latlng) {
+                                                    newLocal.push(latlng)
+                                                    realTimeLine.setLatLngs(newLocal)
+                                                }
+                                                resetMarker.on('move', function (event) {
+                                                    var Position = event.latlng;
+                                                    document.getElementById('Localtion').textContent = Position
+                                                    sendData(Position.lat, Position.lng)
+                                                })
+                                            })
+                                        }).catch((error) => {
+                                            console.error('获取数据时发生错误：', error);
+                                        });
+                                }
+                            })
+                        }
+                    });
+                })
+        }, 1000)
+    </script>
+</body>
+
+</html>
